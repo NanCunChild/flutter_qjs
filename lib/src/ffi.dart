@@ -186,7 +186,9 @@ class _RuntimeOpaque {
 
 final Map<Pointer<JSRuntime>, _RuntimeOpaque> runtimeOpaques = Map();
 
-Pointer<JSValue>? channelDispacher(
+// Dart 3 FFI 要求 Pointer.fromFunction 的回调返回非空指针；原 0.3.7 返回
+// Pointer<JSValue>?，在 Dart 3.12 下编译失败。改为非空并以 nullptr 兜底。
+Pointer<JSValue> channelDispacher(
   Pointer<JSContext> ctx,
   int type,
   Pointer<JSValue> argv,
@@ -194,7 +196,7 @@ Pointer<JSValue>? channelDispacher(
   final rt = type == JSChannelType.FREE_OBJECT
       ? ctx.cast<JSRuntime>()
       : jsGetRuntime(ctx);
-  return runtimeOpaques[rt]?._channel(ctx, type, argv);
+  return runtimeOpaques[rt]?._channel(ctx, type, argv) ?? nullptr;
 }
 
 Pointer<JSRuntime> jsNewRuntime(
