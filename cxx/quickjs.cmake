@@ -9,10 +9,14 @@ add_library(quickjs STATIC
     ${QUICK_JS_LIB_DIR}/libregexp.c
     ${QUICK_JS_LIB_DIR}/libunicode.c
     ${QUICK_JS_LIB_DIR}/quickjs.c
+    ${QUICK_JS_LIB_DIR}/libbf.c
 )
 
 project(quickjs LANGUAGES C)
 target_compile_options(quickjs PRIVATE "-DCONFIG_VERSION=\"${QUICKJS_VERSION}\"")
+# BigInt: enable via CONFIG_BIGNUM (requires compiling libbf.c). Aligns this
+# 2021-03-27 build with downstream server QuickJS which ships BigInt by default.
+target_compile_options(quickjs PRIVATE "-DCONFIG_BIGNUM")
 target_compile_options(quickjs PRIVATE "-DDUMP_LEAKS")
 
 if(MSVC)
