@@ -140,6 +140,22 @@ void _runJsIsolate(Map spawnMessage) async {
     try {
       switch (msg[#type]) {
         case #evaluate:
+          // Host function channel: bind provided Dart closures onto globalThis
+          // before evaluating. Each is an IsolateFunction routed back to the
+          // spawning isolate; returning a Future yields a JS Promise (via
+          // _dartToJs). Inject-once semantics: only the message that carries
+          // #functions binds them; persists across later evaluates on the same
+          // engine. See host-fn-channel extension / elecon ADR-014.
+          final encodedFns = msg[#functions];
+          if (encodedFns != null) {
+            final fns = _decodeData(encodedFns) as Map;
+            final setter = qjs.evaluate('(k,v)=>{globalThis[k]=v;}');
+            try {
+              fns.forEach((k, v) => (setter as JSInvokable).invoke([k, v]));
+            } finally {
+              if (setter is JSRef) setter.free();
+            }
+          }
           data = await qjs.evaluate(
             msg[#command],
             name: msg[#name],
@@ -185,6 +201,13 @@ class IsolateQjs {
   /// Handler function to manage js module.
   final _JsHostPromiseRejectionHandler? hostPromiseRejectionHandler;
 
+  /// Host functions to expose on `globalThis`, wrapped as cross-isolate
+  /// [IsolateFunction]s. Bound onto the worker's globalThis on the first
+  /// [evaluate] (inject-once); invoking from JS routes back to this isolate,
+  /// and a returned Future becomes a JS Promise.
+  final Map<String, IsolateFunction> _hostFunctions = {};
+  bool _hostFunctionsBound = false;
+
   /// Quickjs engine runing on isolate thread.
   ///
   /// Pass handlers to implement js-dart interaction and resolving modules. The `methodHandler` is
@@ -196,6 +219,21 @@ class IsolateQjs {
     this.memoryLimit,
     this.hostPromiseRejectionHandler,
   });
+
+  /// Register host functions callable from JS as `globalThis[name](...)`.
+  ///
+  /// Each value is a Dart closure (may return a Future → JS Promise). The
+  /// closure runs on **this** (spawning) isolate, not the worker — args are
+  /// marshalled in, the return value (or resolved Future) marshalled back; the
+  /// worker/JS never sees Dart closure internals. **Inject-once**: must be
+  /// called before the first [evaluate]; runtime mutation is rejected.
+  void setHostFunctions(Map<String, Function> functions) {
+    if (_hostFunctionsBound) {
+      throw StateError(
+          'host functions must be registered before evaluate (inject-once)');
+    }
+    functions.forEach((k, v) => _hostFunctions[k] = IsolateFunction(v));
+  }
 
   _ensureEngine() {
     if (_sendPort != null) return;
@@ -248,6 +286,13 @@ class IsolateQjs {
 
   /// Free Runtime and close isolate thread that can be recreate when evaluate again.
   close() {
+    // Host-function handlers are reclaimed by the existing IsolateFunction
+    // refcount path: when the worker frees its runtime on #close, the bound
+    // globalThis functions are GC'd, and their cross-isolate #free messages
+    // remove the handlers registered here. Manually destroying them up-front
+    // races those late messages ("handler released"), so we don't.
+    _hostFunctions.clear();
+    _hostFunctionsBound = false;
     final sendPort = _sendPort;
     _sendPort = null;
     if (sendPort == null) return;
@@ -275,13 +320,20 @@ class IsolateQjs {
     _ensureEngine();
     final evaluatePort = ReceivePort();
     final sendPort = await _sendPort!;
-    sendPort.send({
+    final msg = {
       #type: #evaluate,
       #command: command,
       #name: name,
       #flag: evalFlags,
       #port: evaluatePort.sendPort,
-    });
+    };
+    // Inject host functions once, on the first evaluate that follows
+    // setHostFunctions. Encoded as IsolateFunction refs (id + handle port).
+    if (_hostFunctions.isNotEmpty && !_hostFunctionsBound) {
+      msg[#functions] = _encodeData(_hostFunctions);
+      _hostFunctionsBound = true;
+    }
+    sendPort.send(msg);
     final result = await evaluatePort.first;
     evaluatePort.close();
     if (result is Map && result.containsKey(#error))
