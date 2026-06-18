@@ -232,7 +232,12 @@ class IsolateQjs {
       throw StateError(
           'host functions must be registered before evaluate (inject-once)');
     }
-    functions.forEach((k, v) => _hostFunctions[k] = IsolateFunction(v));
+    functions.forEach((k, v) {
+      // Dispose any prior registration for this key so repeated/accumulating
+      // pre-evaluate calls don't leak IsolateFunction handlers.
+      _hostFunctions[k]?.destroy();
+      _hostFunctions[k] = IsolateFunction(v);
+    });
   }
 
   _ensureEngine() {
